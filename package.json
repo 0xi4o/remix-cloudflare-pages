@@ -13,9 +13,15 @@
     "typegen": "wrangler types"
   },
   "dependencies": {
+    "@effect/schema": "^0.72.0",
+    "@evolu/common": "^5.4.4",
+    "@evolu/common-web": "^8.2.1",
+    "@evolu/react": "^8.2.0",
+    "@evolu/server": "^7.2.4",
     "@remix-run/cloudflare": "^2.12.1",
     "@remix-run/cloudflare-pages": "^2.12.1",
     "@remix-run/react": "^2.12.1",
+    "effect": "^3.8.4",
     "isbot": "^4.1.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
@@ -45,3 +51,4 @@
     "node": ">=20.0.0"
   }
 }
+

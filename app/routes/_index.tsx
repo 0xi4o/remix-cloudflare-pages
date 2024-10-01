@@ -1,138 +1,437 @@
-import type { MetaFunction } from "@remix-run/cloudflare";
+import * as S from "@effect/schema/Schema";
+import { formatError } from "@effect/schema/TreeFormatter";
+import {
+  ExtractRow,
+  NonEmptyString1000,
+  SqliteBoolean,
+  String,
+  cast,
+  createIndexes,
+  database,
+  id,
+  parseMnemonic,
+  table,
+} from "@evolu/common";
+import { createEvolu } from "@evolu/common-web";
+import {
+  EvoluProvider,
+  NotNull,
+  jsonArrayFrom,
+  useEvolu,
+  useEvoluError,
+  useOwner,
+  useQuery,
+} from "@evolu/react";
+import { Effect, Exit } from "effect";
+import {
+  ChangeEvent,
+  FC,
+  Suspense,
+  memo,
+  startTransition,
+  useEffect,
+  useState,
+} from "react";
 
-export const meta: MetaFunction = () => {
-  return [
-    { title: "New Remix App" },
-    { name: "description", content: "Welcome to Remix!" },
-  ];
-};
+// Let's start with the database schema.
 
-export default function Index() {
+// Every table needs Id. It's defined as a branded type.
+// Branded types make database types super safe.
+const TodoId = id("Todo");
+type TodoId = typeof TodoId.Type;
+
+const TodoCategoryId = id("TodoCategory");
+type TodoCategoryId = typeof TodoCategoryId.Type;
+
+// This branded type ensures a string must be validated before being put
+// into the database. Check the prompt function to see Schema validation.
+const NonEmptyString50 = String.pipe(
+  S.minLength(1),
+  S.maxLength(50),
+  S.brand("NonEmptyString50")
+);
+type NonEmptyString50 = typeof NonEmptyString50.Type;
+
+// Now we can define tables.
+const TodoTable = table({
+  id: TodoId,
+  title: NonEmptyString1000,
+  isCompleted: S.NullOr(SqliteBoolean),
+  categoryId: S.NullOr(TodoCategoryId),
+});
+type TodoTable = typeof TodoTable.Type;
+
+// Evolu tables can contain typed JSONs.
+const SomeJson = S.Struct({ foo: S.String, bar: S.Boolean });
+type SomeJson = typeof SomeJson.Type;
+
+// Let's make a table with JSON value.
+const TodoCategoryTable = table({
+  id: TodoCategoryId,
+  name: NonEmptyString50,
+  json: S.NullOr(SomeJson),
+});
+type TodoCategoryTable = typeof TodoCategoryTable.Type;
+
+// Now, we can define the database schema.
+const Database = database({
+  todo: TodoTable,
+  todoCategory: TodoCategoryTable,
+});
+type Database = typeof Database.Type;
+
+/**
+ * Indexes are not necessary for development but are required for production.
+ * Before adding an index, use `logExecutionTime` and `logExplainQueryPlan`
+ * createQuery options.
+ *
+ * See https://www.evolu.dev/docs/indexes
+ */
+const indexes = createIndexes((create) => [
+  create("indexTodoCreatedAt").on("todo").column("createdAt"),
+  create("indexTodoCategoryCreatedAt").on("todoCategory").column("createdAt"),
+]);
+
+const evolu = createEvolu(Database, {
+  indexes,
+  // uncomment this line if you would like to enable custom evolu
+  // sync server, e.g. this app server
+  // syncUrl: "http://localhost:3000",
+  initialData: (evolu) => {
+    const { id: categoryId } = evolu.create("todoCategory", {
+      name: S.decodeSync(NonEmptyString50)("Not Urgent"),
+    });
+    evolu.create("todo", {
+      title: S.decodeSync(NonEmptyString1000)("Try React Suspense"),
+      categoryId,
+    });
+  },
+});
+
+export default function RemixExample() {
+  const [currentTab, setCurrentTab] = useState<"todos" | "categories">("todos");
+
+  const handleTabClick = () =>
+    // https://react.dev/reference/react/useTransition#building-a-suspense-enabled-router
+    startTransition(() => {
+      setCurrentTab(currentTab === "todos" ? "categories" : "todos");
+    });
+
   return (
-    <div className="flex h-screen items-center justify-center">
-      <div className="flex flex-col items-center gap-16">
-        <header className="flex flex-col items-center gap-9">
-          <h1 className="leading text-2xl font-bold text-gray-800 dark:text-gray-100">
-            Welcome to <span className="sr-only">Remix</span>
-          </h1>
-          <div className="h-[144px] w-[434px]">
-            <img
-              src="/logo-light.png"
-              alt="Remix"
-              className="block w-full dark:hidden"
-            />
-            <img
-              src="/logo-dark.png"
-              alt="Remix"
-              className="hidden w-full dark:block"
-            />
-          </div>
-        </header>
-        <nav className="flex flex-col items-center justify-center gap-4 rounded-3xl border border-gray-200 p-6 dark:border-gray-700">
-          <p className="leading-6 text-gray-700 dark:text-gray-200">
-            What&apos;s next?
-          </p>
-          <ul>
-            {resources.map(({ href, text, icon }) => (
-              <li key={href}>
-                <a
-                  className="group flex items-center gap-3 self-stretch p-3 leading-normal text-blue-700 hover:underline dark:text-blue-500"
-                  href={href}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {icon}
-                  {text}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </nav>
-      </div>
-    </div>
+    <EvoluProvider value={evolu}>
+      <NotificationBar />
+      <h2 className="mt-6 text-xl font-semibold">
+        {currentTab === "todos" ? "Todos" : "Categories"}
+      </h2>
+      <Suspense>
+        {currentTab === "todos" ? <Todos /> : <TodoCategories />}
+        <Button title="Switch Tab" onClick={handleTabClick} />
+        <p className="my-4">
+          To try React Suspense, click the `Switch Tab` button and rename a
+          category. Then click the `Switch Tab` again to see the updated
+          category name without any loading state. React Suspense is excellent
+          for UX.
+        </p>
+        <p className="my-4">
+          The data created in this example are stored locally in SQLite. Evolu
+          encrypts the data for backup and sync with a Mnemonic, a unique safe
+          password created on your device.
+        </p>
+        <OwnerActions />
+      </Suspense>
+    </EvoluProvider>
   );
 }
 
-const resources = [
+const NotificationBar: FC = () => {
+  const evoluError = useEvoluError();
+  const [showError, setShowError] = useState(false);
+
+  useEffect(() => {
+    if (evoluError) setShowError(true);
+  }, [evoluError]);
+
+  if (!evoluError || !showError) return null;
+
+  return (
+    <div className="mt-3">
+      <p>{`Error: ${JSON.stringify(evoluError)}`}</p>
+      <Button title="Close" onClick={() => setShowError(false)} />
+    </div>
+  );
+};
+
+// Evolu queries should be collocated. If necessary, they can be preloaded.
+const todosWithCategories = evolu.createQuery(
+  (db) =>
+    db
+      .selectFrom("todo")
+      .select(["id", "title", "isCompleted", "categoryId"])
+      .where("isDeleted", "is not", cast(true))
+      // Filter null value and ensure non-null type.
+      .where("title", "is not", null)
+      .$narrowType<{ title: NotNull }>()
+      .orderBy("createdAt")
+      // https://kysely.dev/docs/recipes/relations
+      .select((eb) => [
+        jsonArrayFrom(
+          eb
+            .selectFrom("todoCategory")
+            .select(["todoCategory.id", "todoCategory.name"])
+            .where("isDeleted", "is not", cast(true))
+            .orderBy("createdAt")
+        ).as("categories"),
+      ]),
   {
-    href: "https://remix.run/start/quickstart",
-    text: "Quick Start (5 min)",
-    icon: (
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        width="24"
-        height="20"
-        viewBox="0 0 20 20"
-        fill="none"
-        className="stroke-gray-600 group-hover:stroke-current dark:stroke-gray-300"
+    // logQueryExecutionTime: true,
+    // logExplainQueryPlan: true,
+  }
+);
+
+type TodosWithCategoriesRow = ExtractRow<typeof todosWithCategories>;
+
+const Todos: FC = () => {
+  const { rows } = useQuery(todosWithCategories);
+  const { create } = useEvolu<Database>();
+
+  const handleAddTodoClick = () => {
+    prompt(NonEmptyString1000, "What needs to be done?", (title) => {
+      create("todo", { title });
+    });
+  };
+
+  return (
+    <>
+      <ul className="py-2">
+        {rows.map((row) => (
+          <TodoItem key={row.id} row={row} />
+        ))}
+      </ul>
+      <Button title="Add Todo" onClick={handleAddTodoClick} />
+    </>
+  );
+};
+
+const TodoItem = memo<{
+  row: TodosWithCategoriesRow;
+}>(function TodoItem({
+  row: { id, title, isCompleted, categoryId, categories },
+}) {
+  const { update } = useEvolu<Database>();
+
+  const handleToggleCompletedClick = () => {
+    update("todo", { id, isCompleted: !isCompleted });
+  };
+
+  const handleRenameClick = () => {
+    prompt(NonEmptyString1000, "New Name", (title) => {
+      update("todo", { id, title });
+    });
+  };
+
+  const handleDeleteClick = () => {
+    update("todo", { id, isDeleted: true });
+  };
+
+  return (
+    <li>
+      <span
+        className="text-sm font-bold"
+        style={{ textDecoration: isCompleted ? "line-through" : "none" }}
       >
-        <path
-          d="M8.51851 12.0741L7.92592 18L15.6296 9.7037L11.4815 7.33333L12.0741 2L4.37036 10.2963L8.51851 12.0741Z"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    ),
-  },
-  {
-    href: "https://remix.run/start/tutorial",
-    text: "Tutorial (30 min)",
-    icon: (
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        width="24"
-        height="20"
-        viewBox="0 0 20 20"
-        fill="none"
-        className="stroke-gray-600 group-hover:stroke-current dark:stroke-gray-300"
-      >
-        <path
-          d="M4.561 12.749L3.15503 14.1549M3.00811 8.99944H1.01978M3.15503 3.84489L4.561 5.2508M8.3107 1.70923L8.3107 3.69749M13.4655 3.84489L12.0595 5.2508M18.1868 17.0974L16.635 18.6491C16.4636 18.8205 16.1858 18.8205 16.0144 18.6491L13.568 16.2028C13.383 16.0178 13.0784 16.0347 12.915 16.239L11.2697 18.2956C11.047 18.5739 10.6029 18.4847 10.505 18.142L7.85215 8.85711C7.75756 8.52603 8.06365 8.21994 8.39472 8.31453L17.6796 10.9673C18.0223 11.0653 18.1115 11.5094 17.8332 11.7321L15.7766 13.3773C15.5723 13.5408 15.5554 13.8454 15.7404 14.0304L18.1868 16.4767C18.3582 16.6481 18.3582 16.926 18.1868 17.0974Z"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    ),
-  },
-  {
-    href: "https://remix.run/docs",
-    text: "Remix Docs",
-    icon: (
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        width="24"
-        height="20"
-        viewBox="0 0 20 20"
-        fill="none"
-        className="stroke-gray-600 group-hover:stroke-current dark:stroke-gray-300"
-      >
-        <path
-          d="M9.99981 10.0751V9.99992M17.4688 17.4688C15.889 19.0485 11.2645 16.9853 7.13958 12.8604C3.01467 8.73546 0.951405 4.11091 2.53116 2.53116C4.11091 0.951405 8.73546 3.01467 12.8604 7.13958C16.9853 11.2645 19.0485 15.889 17.4688 17.4688ZM2.53132 17.4688C0.951566 15.8891 3.01483 11.2645 7.13974 7.13963C11.2647 3.01471 15.8892 0.951453 17.469 2.53121C19.0487 4.11096 16.9854 8.73551 12.8605 12.8604C8.73562 16.9853 4.11107 19.0486 2.53132 17.4688Z"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-        />
-      </svg>
-    ),
-  },
-  {
-    href: "https://rmx.as/discord",
-    text: "Join Discord",
-    icon: (
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        width="24"
-        height="20"
-        viewBox="0 0 24 20"
-        fill="none"
-        className="stroke-gray-600 group-hover:stroke-current dark:stroke-gray-300"
-      >
-        <path
-          d="M15.0686 1.25995L14.5477 1.17423L14.2913 1.63578C14.1754 1.84439 14.0545 2.08275 13.9422 2.31963C12.6461 2.16488 11.3406 2.16505 10.0445 2.32014C9.92822 2.08178 9.80478 1.84975 9.67412 1.62413L9.41449 1.17584L8.90333 1.25995C7.33547 1.51794 5.80717 1.99419 4.37748 2.66939L4.19 2.75793L4.07461 2.93019C1.23864 7.16437 0.46302 11.3053 0.838165 15.3924L0.868838 15.7266L1.13844 15.9264C2.81818 17.1714 4.68053 18.1233 6.68582 18.719L7.18892 18.8684L7.50166 18.4469C7.96179 17.8268 8.36504 17.1824 8.709 16.4944L8.71099 16.4904C10.8645 17.0471 13.128 17.0485 15.2821 16.4947C15.6261 17.1826 16.0293 17.8269 16.4892 18.4469L16.805 18.8725L17.3116 18.717C19.3056 18.105 21.1876 17.1751 22.8559 15.9238L23.1224 15.724L23.1528 15.3923C23.5873 10.6524 22.3579 6.53306 19.8947 2.90714L19.7759 2.73227L19.5833 2.64518C18.1437 1.99439 16.6386 1.51826 15.0686 1.25995ZM16.6074 10.7755L16.6074 10.7756C16.5934 11.6409 16.0212 12.1444 15.4783 12.1444C14.9297 12.1444 14.3493 11.6173 14.3493 10.7877C14.3493 9.94885 14.9378 9.41192 15.4783 9.41192C16.0471 9.41192 16.6209 9.93851 16.6074 10.7755ZM8.49373 12.1444C7.94513 12.1444 7.36471 11.6173 7.36471 10.7877C7.36471 9.94885 7.95323 9.41192 8.49373 9.41192C9.06038 9.41192 9.63892 9.93712 9.6417 10.7815C9.62517 11.6239 9.05462 12.1444 8.49373 12.1444Z"
-          strokeWidth="1.5"
-        />
-      </svg>
-    ),
-  },
-];
+        {title}
+      </span>
+      <Button
+        title={isCompleted ? "Completed" : "Complete"}
+        onClick={handleToggleCompletedClick}
+      />
+      <Button title="Rename" onClick={handleRenameClick} />
+      <Button title="Delete" onClick={handleDeleteClick} />
+      <TodoCategorySelect
+        categories={categories}
+        selected={categoryId}
+        onSelect={(categoryId) => {
+          update("todo", { id, categoryId });
+        }}
+      />
+    </li>
+  );
+});
+
+const TodoCategorySelect: FC<{
+  categories: TodosWithCategoriesRow["categories"];
+  selected: TodoCategoryId | null;
+  onSelect: (value: TodoCategoryId | null) => void;
+}> = ({ categories, selected, onSelect }) => {
+  const nothingSelected = "";
+  const value =
+    selected && categories.find((row) => row.id === selected)
+      ? selected
+      : nothingSelected;
+
+  return (
+    <select
+      value={value}
+      onChange={({ target: { value } }: ChangeEvent<HTMLSelectElement>) => {
+        onSelect(value === nothingSelected ? null : (value as TodoCategoryId));
+      }}
+    >
+      <option value={nothingSelected}>-- no category --</option>
+      {categories.map(({ id, name }) => (
+        <option key={id} value={id}>
+          {name}
+        </option>
+      ))}
+    </select>
+  );
+};
+
+const todoCategories = evolu.createQuery((db) =>
+  db
+    .selectFrom("todoCategory")
+    .select(["id", "name", "json"])
+    .where("isDeleted", "is not", cast(true))
+    // Filter null value and ensure non-null type.
+    .where("name", "is not", null)
+    .$narrowType<{ name: NotNull }>()
+    .orderBy("createdAt")
+);
+
+type TodoCategoriesRow = ExtractRow<typeof todoCategories>;
+
+const TodoCategories: FC = () => {
+  const { rows } = useQuery(todoCategories);
+  const { create } = useEvolu<Database>();
+
+  // Evolu automatically parses JSONs into typed objects.
+  // if (rows[0]) console.log(rows[1].json?.foo);
+
+  const handleAddCategoryClick = () => {
+    prompt(NonEmptyString50, "Category Name", (name) => {
+      create("todoCategory", {
+        name,
+        json: { foo: "a", bar: false },
+      });
+    });
+  };
+
+  return (
+    <>
+      <ul className="py-2">
+        {rows.map((row) => (
+          <TodoCategoryItem row={row} key={row.id} />
+        ))}
+      </ul>
+      <Button title="Add Category" onClick={handleAddCategoryClick} />
+    </>
+  );
+};
+
+const TodoCategoryItem = memo<{
+  row: TodoCategoriesRow;
+}>(function TodoItem({ row: { id, name } }) {
+  const { update } = useEvolu<Database>();
+
+  const handleRenameClick = () => {
+    prompt(NonEmptyString50, "Category Name", (name) => {
+      update("todoCategory", { id, name });
+    });
+  };
+
+  const handleDeleteClick = () => {
+    update("todoCategory", { id, isDeleted: true });
+  };
+
+  return (
+    <>
+      <li key={id}>
+        <span className="text-sm font-bold">{name}</span>
+        <Button title="Rename" onClick={handleRenameClick} />
+        <Button title="Delete" onClick={handleDeleteClick} />
+      </li>
+    </>
+  );
+});
+
+const OwnerActions: FC = () => {
+  const evolu = useEvolu<Database>();
+  const owner = useOwner();
+  const [showMnemonic, setShowMnemonic] = useState(false);
+
+  const handleRestoreOwnerClick = () => {
+    prompt(NonEmptyString1000, "Your Mnemonic", (mnemonic) => {
+      parseMnemonic(mnemonic)
+        .pipe(Effect.runPromiseExit)
+        .then(
+          Exit.match({
+            onFailure: (error) => {
+              alert(JSON.stringify(error, null, 2));
+            },
+            onSuccess: (mnemonic) => {
+              evolu.restoreOwner(mnemonic);
+            },
+          })
+        );
+    });
+  };
+
+  const handleResetOwnerClick = () => {
+    if (confirm("Are you sure? It will delete all your local data.")) {
+      evolu.resetOwner();
+    }
+  };
+
+  return (
+    <div className="mt-6">
+      <p>
+        Open this page on a different device and use your mnemonic to restore
+        your data.
+      </p>
+      <Button
+        title={`${showMnemonic ? "Hide" : "Show"} Mnemonic`}
+        onClick={() => setShowMnemonic(!showMnemonic)}
+      />
+      <Button title="Restore Owner" onClick={handleRestoreOwnerClick} />
+      <Button title="Reset Owner" onClick={handleResetOwnerClick} />
+      {showMnemonic && owner != null && (
+        <div>
+          <textarea
+            value={owner.mnemonic}
+            readOnly
+            rows={2}
+            style={{ width: 320 }}
+          />
+        </div>
+      )}
+    </div>
+  );
+};
+
+const Button: FC<{
+  title: string;
+  onClick: () => void;
+}> = ({ title, onClick }) => {
+  return (
+    <button
+      className="m-1 rounded-md border border-current px-1 text-sm active:opacity-80"
+      onClick={onClick}
+    >
+      {title}
+    </button>
+  );
+};
+
+const prompt = <From extends string, To>(
+  schema: S.Schema<To, From, never>,
+  message: string,
+  onSuccess: (value: To) => void
+) => {
+  const value = window.prompt(message);
+  if (value == null) return; // on cancel
+  const a = S.decodeUnknownEither(schema)(value);
+  if (a._tag === "Left") {
+    alert(formatError(a.left));
+    return;
+  }
+  onSuccess(a.right);
+};
